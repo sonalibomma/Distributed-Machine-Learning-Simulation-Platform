@@ -1,12 +1,3 @@
-"""
-Load experiment folders into a normalized structure for the simulation GUI.
-
-Supports:
-- GUI save format (param_values, communication_cards, environment block)
-- Backend / research format (parameters.node_count, profile_assignment,
-  nested communication.communication, save.path, dir_path, adjacency topology[])
-"""
-
 from __future__ import annotations
 
 import copy
