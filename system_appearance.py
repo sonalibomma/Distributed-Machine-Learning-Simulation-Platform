@@ -9,13 +9,7 @@ AppearanceMode = Literal["light", "dark"]
 
 
 def detect_os_appearance() -> AppearanceMode:
-    """
-    Best-effort OS appearance detection.
-
-    macOS: ``defaults read -g AppleInterfaceStyle``
-    Windows: ``AppsUseLightTheme`` registry value
-    Linux: GNOME ``color-scheme`` gsettings, then ``GTK_THEME`` env hint
-    """
+    
     if sys.platform == "darwin":
         return _detect_macos()
     if sys.platform == "win32":
