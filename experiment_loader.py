@@ -1,12 +1,29 @@
+"""
+Load experiment folders into a normalized structure for the simulation GUI.
+
+Supports:
+- GUI save format (param_values, communication_cards, environment block)
+- Backend / research format (parameters.node_count, profile_assignment,
+  nested communication.communication, save.path, dir_path, adjacency topology[])
+"""
+
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import pprint
 from pathlib import Path
 from typing import Any, Optional
 
+from experiment_io import (
+    load_network_config,
+    missing_required_files,
+    read_required_yaml,
+    read_yaml_file,
+    TOPOLOGY_YAML,
+    AGENT_YAML,
+    yaml_path,
+)
 from experiment_data import (
     GRAPH_TYPES,
     default_communication_card,
@@ -51,24 +68,15 @@ BACKEND_GRAPH_TYPE_MAP: dict[str, str] = {
 }
 
 
-def read_json_file(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON in {path.name}:\n{e}") from e
-    except OSError as e:
-        raise ValueError(f"Could not read {path.name}:\n{e}") from e
-
-
 def debug_print_loaded_files(
     config: dict[str, Any],
     topology: dict[str, Any],
     agent: dict[str, Any],
 ) -> None:
     for title, data in (
-        ("CONFIGURATION.JSON", config),
-        ("TOPOLOGY.JSON", topology),
-        ("AGENT_ASSIGNMENT.JSON", agent),
+        ("EXPERIMENT", config),
+        ("TOPOLOGY", topology),
+        ("AGENT_ASSIGNMENT", agent),
     ):
         block = f"\n=== {title} ===\n{pprint.pformat(data, width=120, sort_dicts=False)}\n"
         print(block)
@@ -167,7 +175,7 @@ def _backend_topology_param_values(params: dict[str, Any], gui_gt: str) -> list[
 
 
 def normalize_topology_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
-    """Map backend topology.json or GUI topology export to GUI topology state."""
+    """Map backend topology.yaml or GUI topology export to GUI topology state."""
     if _is_backend_topology(raw):
         params = raw.get("parameters") if isinstance(raw.get("parameters"), dict) else {}
         gui_gt = _gui_graph_type(params.get("graph_type"))
@@ -208,8 +216,8 @@ def normalize_environment_from_config(config: dict[str, Any], folder: Path, topo
         dir_path = config.get("dir_path")
         if isinstance(dir_path, dict):
             base = str(dir_path.get("path", "")).strip()
-            topo_name = str(dir_path.get("topology", "topology.json")).strip()
-            agent_name = str(dir_path.get("agent_assignment", "agent_assignment.json")).strip()
+            topo_name = str(dir_path.get("topology", TOPOLOGY_YAML)).strip()
+            agent_name = str(dir_path.get("agent_assignment", AGENT_YAML)).strip()
             if base:
                 env["topology_assignment_path"] = str((Path(base) / topo_name).resolve()) if topo_name else base
                 env["agent_assignment_path"] = str((Path(base) / agent_name).resolve()) if agent_name else base
@@ -218,8 +226,10 @@ def normalize_environment_from_config(config: dict[str, Any], folder: Path, topo
     if seed is not None:
         env["random_seed"] = seed
 
-    env["topology_assignment_path"] = str((folder / "topology.json").resolve())
-    env["agent_assignment_path"] = str((folder / "agent_assignment.json").resolve())
+    topo_path = yaml_path(folder, "topology")
+    agent_path = yaml_path(folder, "agent_assignment")
+    env["topology_assignment_path"] = str(topo_path.resolve())
+    env["agent_assignment_path"] = str(agent_path.resolve())
     return env
 
 
@@ -389,21 +399,22 @@ def load_experiment_folder(folder: Path) -> dict[str, Any]:
     if not folder.exists() or not folder.is_dir():
         raise ValueError(f"Experiment folder not found:\n{folder}")
 
-    req = ["topology.json", "agent_assignment.json", "configuration.json"]
-    missing = [x for x in req if not (folder / x).is_file()]
+    missing = missing_required_files(folder)
     if missing:
+        if len(missing) == 1:
+            raise ValueError(f"Missing required file:\n\n{missing[0]}")
         raise ValueError(
             "Missing required files in experiment folder:\n\n"
             + "\n".join(missing)
             + f"\n\nFolder: {folder}"
         )
 
-    config_raw = read_json_file(folder / "configuration.json")
-    topo_raw = read_json_file(folder / "topology.json")
-    agent_raw = read_json_file(folder / "agent_assignment.json")
+    config_raw = read_required_yaml(folder, "experiment")
+    topo_raw = read_required_yaml(folder, "topology")
+    agent_raw = read_required_yaml(folder, "agent_assignment")
 
     if not all(isinstance(x, dict) for x in (config_raw, topo_raw, agent_raw)):
-        raise ValueError("All experiment JSON files must contain a JSON object at the root.")
+        raise ValueError("All experiment configuration files must contain a mapping at the root.")
 
     config: dict[str, Any] = config_raw
     topo: dict[str, Any] = topo_raw
@@ -440,6 +451,10 @@ def load_experiment_folder(folder: Path) -> dict[str, Any]:
         state["data_assignment"] = da
     elif _is_backend_agent(agent):
         state["data_assignment"] = normalize_data_assignment_from_raw(agent)
+
+    network = load_network_config(folder)
+    if network is not None:
+        state["network_config"] = network
 
     return state
 
