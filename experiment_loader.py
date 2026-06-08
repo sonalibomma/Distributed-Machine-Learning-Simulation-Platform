@@ -1,12 +1,3 @@
-"""
-Load experiment folders into a normalized structure for the simulation GUI.
-
-Supports:
-- GUI save format (param_values, communication_cards, environment block)
-- Backend / research format (parameters.node_count, profile_assignment,
-  nested communication.communication, save.path, dir_path, adjacency topology[])
-"""
-
 from __future__ import annotations
 
 import copy
@@ -48,7 +39,7 @@ from experiment_data import (
 
 logger = logging.getLogger("experiment_loader")
 
-# Backend graph_type values -> GUI generator ids
+
 BACKEND_GRAPH_TYPE_MAP: dict[str, str] = {
     "mesh": "ws",
     "watts_strogatz": "ws",
