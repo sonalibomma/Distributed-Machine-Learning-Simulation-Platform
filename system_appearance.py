@@ -1,4 +1,3 @@
-"""Detect operating-system light/dark appearance for adaptive theming."""
 from __future__ import annotations
 
 import os
