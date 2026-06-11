@@ -1,5 +1,3 @@
-"""Read-only synchronization and validation between the Driver YAML stack and the Experiment tab."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
