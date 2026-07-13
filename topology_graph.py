@@ -6,6 +6,8 @@ from typing import Any, Optional, Tuple
 
 import networkx as nx
 
+from experiment_data import graph_type_canonical
+
 
 def _safe_int(s: Any, default: int = 0) -> int:
     try:
@@ -78,7 +80,7 @@ def _graph_type_from_dict(d: dict[str, Any]) -> str:
 
 def generate_from_ui_topology(topology: dict[str, Any]) -> Tuple[nx.Graph, str]:
     """Generate a graph from UI topology state (graph_type + param_values + seed)."""
-    gt = str(topology.get("graph_type", "er")).strip().lower()
+    gt = graph_type_canonical(topology.get("graph_type", "er"))
     pv = [str(x) for x in (topology.get("param_values") or [])]
     seed = _safe_int(topology.get("global_seed", 0), 0)
 
@@ -96,6 +98,11 @@ def generate_from_ui_topology(topology: dict[str, Any]) -> Tuple[nx.Graph, str]:
             n, m = max(2, ri(0, 15)), max(1, ri(1, 2))
             m = min(m, n - 1)
             return nx.barabasi_albert_graph(n, m, seed=seed), f"barabasi_albert_graph(n={n}, m={m})"
+        if gt == "extended_barabasi":
+            n, m = max(2, ri(0, 15)), max(1, ri(1, 2))
+            m = min(m, n - 1)
+            p = min(1.0, max(0.0, rf(2, 0.1)))
+            return nx.extended_barabasi_graph(n, m, p, seed=seed), f"extended_barabasi_graph(n={n}, m={m}, p={p})"
         if gt == "ws":
             n, k, p = max(3, ri(0, 20)), max(2, ri(1, 4)), min(1.0, max(0.0, rf(2, 0.1)))
             if k >= n:

@@ -1,3 +1,5 @@
+"""Read-only synchronization and validation between the Driver YAML stack and the Experiment tab."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -304,12 +306,12 @@ def validate_yaml_stack(snapshot: YamlStackSnapshot) -> list[str]:
         if not ok:
             errors.extend(f"Assignments: {e}" for e in assign_errs)
 
-    if snapshot.network_path is None:
-        errors.append("Network: network.yaml is not loaded (set paths.network in driver.yaml).")
-    else:
+    # network.yaml is optional: models now live in definitions.yaml, so the
+    # stack is valid without it. When present, only its optimizers/criteria are
+    # validated.
+    if snapshot.network_path is not None:
         net_state = network_gui_state_from_document(snapshot.network_document or {})
         ok, net_errs = validate_network_state(
-            models=net_state.get("models", []),
             optimizers=net_state.get("optimizers", []),
             criteria=net_state.get("criteria", []),
         )

@@ -1,9 +1,8 @@
-"""Validate topology blocks produced by the simulation UI (graph_type + param_values)."""
 from __future__ import annotations
 
 from typing import Any, Optional, Tuple
 
-from experiment_data import SEED_GRAPH_TYPES
+from experiment_data import SEED_GRAPH_TYPES, graph_type_canonical, graph_type_label
 
 
 def _sf(s: Any, default: float = 0.0) -> float:
@@ -39,7 +38,7 @@ def validate_ui_topology(topology: dict[str, Any]) -> Tuple[bool, str]:
     Check graph_type, param_values, SBM mode, and seed where required.
     Returns (ok, message) suitable for the topology validation label.
     """
-    gt = str(topology.get("graph_type", "")).strip().lower()
+    gt = graph_type_canonical(topology.get("graph_type", ""))
     if not gt:
         return _fail("choose a graph type.")
 
@@ -88,6 +87,15 @@ def validate_ui_topology(topology: dict[str, Any]) -> Tuple[bool, str]:
             return _fail(err)
     elif gt == "ba":
         err = need_len(2) or check_int_min(0, "n", 2) or check_int_min(1, "m", 1)
+        if err:
+            return _fail(err)
+    elif gt == "extended_barabasi":
+        err = (
+            need_len(3)
+            or check_int_min(0, "n", 2)
+            or check_int_min(1, "m", 1)
+            or check_prob_index(2, "p")
+        )
         if err:
             return _fail(err)
     elif gt == "ws":
@@ -255,4 +263,4 @@ def validate_ui_topology(topology: dict[str, Any]) -> Tuple[bool, str]:
         except Exception:
             return _fail("global seed must be an integer (or decimal that maps to an integer).")
 
-    return _ok(f"{gt} parameters checked.")
+    return _ok(f"{graph_type_label(gt)} parameters checked.")

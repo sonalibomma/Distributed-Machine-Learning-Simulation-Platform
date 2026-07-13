@@ -1,4 +1,3 @@
-"""Normalize communication / group-policy experiment data for logging and lightweight run-time hints."""
 from __future__ import annotations
 
 from typing import Any, Optional, Tuple
@@ -43,15 +42,7 @@ def normalize_communication_cards(state: dict[str, Any]) -> list[dict[str, Any]]
             continue
         item = dict(c)
         item["_index"] = i
-        for k in (
-            "latency_prob",
-            "dropout_prob",
-            "interruption_prob",
-            "latency_min",
-            "latency_max",
-            "earliest_interruption",
-            "latest_interruption",
-        ):
+        for k in ("latency_prob", "dropout_prob", "latency_min", "latency_max"):
             if k in item:
                 item[f"_{k}_p"] = _parse_prob(item[k]) if "prob" in k else _parse_float(item[k])
         ar = item.get("assignment_ranges")
@@ -88,7 +79,7 @@ def validate_run_policies(state: dict[str, Any]) -> Tuple[bool, list[str]]:
             if not isinstance(c, dict):
                 warnings.append(f"Communication card {i + 1} is not an object; skipped.")
                 continue
-            for k in ("latency_prob", "dropout_prob", "interruption_prob"):
+            for k in ("latency_prob", "dropout_prob"):
                 if k not in c:
                     continue
                 s = c[k]
@@ -96,7 +87,7 @@ def validate_run_policies(state: dict[str, Any]) -> Tuple[bool, list[str]]:
                     continue
                 if _parse_prob(s) is None:
                     warnings.append(f"Communication card {i + 1}: {k} should be empty or a probability in [0, 1].")
-            for k in ("latency_min", "latency_max", "earliest_interruption", "latest_interruption"):
+            for k in ("latency_min", "latency_max"):
                 if k not in c:
                     continue
                 s = c[k]

@@ -1,3 +1,10 @@
+"""
+Shared validation helpers for experiment UI and run preflight.
+
+In distributed ML configs, -1 commonly means unlimited / disabled / use default.
+Valid numeric profile values: -1, 0, or any positive number.
+Invalid: -2, -3, …, non-numeric, empty required fields.
+"""
 from __future__ import annotations
 
 from typing import Any, Optional
