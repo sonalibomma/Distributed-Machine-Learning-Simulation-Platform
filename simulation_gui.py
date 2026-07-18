@@ -219,14 +219,12 @@ from ui_chrome import (
     card_footer,
     ModernCard,
     NavTabBar,
+    PageShell,
     SPACE_LG,
     SPACE_MD,
     SPACE_SM,
     SPACE_XS,
     CARD_GAP,
-    SingleScrollDashboard,
-    ThreeColumnLayout,
-    hide_notebook_tabs,
     mount_card,
     stack_field,
     status_badge,
@@ -373,6 +371,14 @@ def _panel_grid(grid: CardGrid, title: str, **kwargs: Any) -> tuple[tk.Misc, tk.
 def _column_card(parent, title: str, **kwargs: Any) -> tuple[tk.Misc, tk.Misc]:
     """Stack a dashboard card vertically inside a 3-column layout cell."""
     return mount_card(parent, title, **kwargs)
+
+
+def _driver_grid_card(parent: tk.Misc, title: str, row: int) -> tuple[tk.Misc, tk.Misc]:
+    """Driver tab: grid-stacked card (natural height, top-aligned column)."""
+    card = ModernCard(parent, title)
+    card.outer.grid(row=row, column=0, sticky="new", pady=(0, CARD_GAP))
+    parent.columnconfigure(0, weight=1)
+    return card.outer, card.body
 
 
 def _mount_panel(outer: tk.Misc, grid: CardGrid | None) -> None:
@@ -581,6 +587,13 @@ class MainWindow:
         self._generated_command: str = ""
         self._command_preview_result: CommandPreviewResult | None = None
         self._run_window: RunWindow | None = None
+        self._main_tab_index = -1
+        self._pages_hydrated: set[int] = set()
+        self._sync_dashboard_pending = False
+        self._batch_stack_refresh = False
+        self._perm_rebuild_active = False
+        self._run_config_refresh_after_id: str | None = None
+        self._assign_dropdown_cache: dict[int, tuple[str, ...]] = {}
 
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -591,40 +604,23 @@ class MainWindow:
         main_container.columnconfigure(0, weight=1)
         main_container.rowconfigure(1, weight=1)
 
-        hide_notebook_tabs()
         nav_row = tk.Frame(main_container, bg=LIST_SURFACE_BG, highlightthickness=0)
         nav_row.grid(row=0, column=0, sticky="ew", pady=(0, SPACE_SM))
         nav_row.columnconfigure(0, weight=1)
 
-        self._dashboard = ThreeColumnLayout(main_container, row=1, column=0)
-        self._driver_fields = {}
-        self._build_driver_persistent(self._dashboard.left_col, self._dashboard.center_col)
-
-        self._perm_stack_host = tk.Frame(self._dashboard.right_col, bg=BG_MAIN)
-        self._right_notebook_host = tk.Frame(self._dashboard.right_col, bg=BG_MAIN)
-
-        self._page_notebook = ttk.Notebook(self._right_notebook_host)
-        self._page_notebook.pack(fill=tk.X, anchor=tk.N)
-
-        driver_tab = ttk.Frame(self._page_notebook)
-        permutations_tab = ttk.Frame(self._page_notebook)
-        topologies_tab = ttk.Frame(self._page_notebook)
-        assignments_tab = ttk.Frame(self._page_notebook)
-        definitions_tab = ttk.Frame(self._page_notebook)
-        network_tab = ttk.Frame(self._page_notebook)
-        experiment_tab = ttk.Frame(self._page_notebook)
-        self._page_notebook.add(driver_tab, text="Driver")
-        self._page_notebook.add(permutations_tab, text="Permutations")
-        self._page_notebook.add(topologies_tab, text="Topologies")
-        self._page_notebook.add(assignments_tab, text="Assignments")
-        self._page_notebook.add(definitions_tab, text="Definitions")
-        self._page_notebook.add(network_tab, text="Network")
-        self._page_notebook.add(experiment_tab, text="Experiment")
+        self._page_shell = PageShell(main_container, row=1, column=0)
+        driver_page = self._page_shell.add_page()
+        permutations_page = self._page_shell.add_page()
+        topologies_page = self._page_shell.add_page()
+        assignments_page = self._page_shell.add_page()
+        definitions_page = self._page_shell.add_page()
+        network_page = self._page_shell.add_page()
+        experiment_page = self._page_shell.add_page()
 
         self._pill_tab_bar = NavTabBar(
             nav_row,
-            self._page_notebook,
             ["Driver", "Permutations", "Topologies", "Assignments", "Definitions", "Network", "Experiment"],
+            on_select=self._select_main_tab,
         )
         self._pill_tab_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -697,20 +693,17 @@ class MainWindow:
             on_run=self._on_run_clicked,
         ).grid(row=1, column=0, sticky="ew")
 
-        self._build_driver_page(driver_tab)
-        self._build_permutation_stack(self._perm_stack_host)
-        self._build_permutations_page(permutations_tab)
-        self._build_topologies_page(topologies_tab)
-        self._build_assignments_page(assignments_tab)
-        self._build_definitions_page(definitions_tab)
-        self._build_network_page(network_tab)
-        self._build_experiment_page(experiment_tab)
+        self._driver_fields = {}
+        self._build_driver_page(driver_page)
+        self._build_permutations_page(permutations_page)
+        self._build_topologies_page(topologies_page)
+        self._build_assignments_page(assignments_page)
+        self._build_definitions_page(definitions_page)
+        self._build_network_page(network_page)
+        self._build_experiment_page(experiment_page)
 
-        self._page_notebook.bind("<<NotebookTabChanged>>", self._on_main_tab_changed, add=True)
         self._setup_page_wheel_scroll()
-        self._page_notebook.select(0)
-        self._perm_stack_host.pack(fill=tk.X, anchor=tk.N)
-        self._on_main_tab_changed()
+        self._select_main_tab(0)
 
         self._init_experiment_workspace()
         self._sync_dashboard()
@@ -811,12 +804,23 @@ class MainWindow:
             pass
 
     def _refresh_run_config_preview(self) -> None:
+        """Debounced — coalesces rapid checkbox / load callbacks."""
+        if self._run_config_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._run_config_refresh_after_id)
+            except tk.TclError:
+                pass
+        self._run_config_refresh_after_id = self.root.after(40, self._refresh_run_config_preview_impl)
+
+    def _refresh_run_config_preview_impl(self) -> None:
+        self._run_config_refresh_after_id = None
         if self._driver_file_path is None:
             self._run_configuration = None
             self._clear_experiment_instances()
             self._set_run_config_preview_text(
                 "Load driver.yaml to build a run configuration from the YAML stack and permutations."
             )
+            self._refresh_driver_summary()
             return
 
         snapshot = self._collect_run_stack_snapshot()
@@ -830,11 +834,13 @@ class MainWindow:
             if len(errors) > 12:
                 err_lines += f"\n• … and {len(errors) - 12} more."
             self._set_run_config_preview_text(f"{body}\n\nValidation:\n{err_lines}")
+            self._refresh_driver_summary()
             return
 
         self._run_configuration = config
         self._set_run_config_preview_text(format_run_config_preview(config))
         self._update_experiment_instance_estimate()
+        self._refresh_driver_summary()
 
     def _update_experiment_instance_estimate(self) -> None:
         """Update instance panel labels from run config without building all instances."""
@@ -1056,11 +1062,24 @@ class MainWindow:
         )
 
     def _sync_dashboard(self) -> None:
-        if hasattr(self, "_dashboard"):
-            self._dashboard.sync()
+        if not hasattr(self, "_page_shell"):
+            return
+        if self._sync_dashboard_pending:
+            return
+        self._sync_dashboard_pending = True
+
+        def _do() -> None:
+            self._sync_dashboard_pending = False
+            if hasattr(self, "_page_shell"):
+                self._page_shell.sync()
+
+        try:
+            self.root.after_idle(_do)
+        except tk.TclError:
+            self._sync_dashboard_pending = False
 
     def _setup_page_wheel_scroll(self) -> None:
-        """Route mouse wheel to the single main dashboard scroll area."""
+        """Route mouse wheel to the single main page scroll area."""
 
         def _wheel(event):
             try:
@@ -1083,8 +1102,8 @@ class MainWindow:
                         pass
                 p = getattr(p, "master", None)
             delta = int(-1 * (event.delta / 120))
-            if hasattr(self, "_dashboard"):
-                self._dashboard.scroll_wheel(delta)
+            if hasattr(self, "_page_shell"):
+                self._page_shell.scroll_wheel(delta)
 
         self.root.bind_all("<MouseWheel>", _wheel)
 
@@ -1137,30 +1156,36 @@ class MainWindow:
             pad = (12, 0) if i == len(widgets) - 1 and widget.winfo_class() == "TLabel" else (0, 6)
             widget.pack(side=tk.LEFT, padx=pad)
 
-    def _on_main_tab_changed(self, _e: tk.Event | None = None) -> None:
-        try:
-            idx = int(self._page_notebook.index(self._page_notebook.select()))
-        except tk.TclError:
+    def _select_main_tab(self, tab_index: int) -> None:
+        if tab_index < 0 or tab_index > 6:
             return
-        self._refresh_nav_actions(idx)
-        is_experiment = idx == 6
-        show_perm_stack = idx in (0, 1)
-        dash = self._dashboard
-        if show_perm_stack:
-            self._right_notebook_host.pack_forget()
-            self._perm_stack_host.pack(fill=tk.X, anchor=tk.N)
-        else:
-            self._perm_stack_host.pack_forget()
-            self._right_notebook_host.pack(fill=tk.X, anchor=tk.N)
-        if is_experiment:
-            dash.left_col.grid_remove()
-            dash.center_col.grid_remove()
-            dash.right_col.grid(row=0, column=0, columnspan=3, sticky="new", padx=0)
-        else:
-            dash.left_col.grid(row=0, column=0, sticky="new", padx=(0, CARD_GAP))
-            dash.center_col.grid(row=0, column=1, sticky="new", padx=(0, CARD_GAP))
-            dash.right_col.grid(row=0, column=2, columnspan=1, sticky="new", padx=0)
+        if tab_index == self._main_tab_index:
+            self._refresh_nav_actions(tab_index)
+            return
+        self._page_shell.remember_scroll(self._main_tab_index)
+        self._main_tab_index = tab_index
+        if hasattr(self, "_pill_tab_bar"):
+            self._pill_tab_bar.set_active(tab_index)
+        self._page_shell.select(tab_index)
+        self._refresh_nav_actions(tab_index)
+        self._ensure_page_hydrated(tab_index)
         self._sync_dashboard()
+
+    def _ensure_page_hydrated(self, tab_index: int) -> None:
+        """Lazy-load heavy card grids the first time a tab is shown."""
+        if tab_index in self._pages_hydrated:
+            return
+        self._pages_hydrated.add(tab_index)
+        if tab_index == 1:
+            self._perm_rebuild_checkboxes()
+        elif tab_index == 2:
+            self._topo_rebuild_cards()
+        elif tab_index == 3:
+            self._assign_rebuild_all()
+        elif tab_index == 4:
+            self._defn_rebuild_all()
+        elif tab_index == 5:
+            self._net_rebuild_all()
 
     def _driver_path_row(self, parent: ttk.Frame, label: str, key: str, tip: str, row: int) -> None:
         ttk.Label(parent, text=label, style="Muted.TLabel").grid(row=row * 2, column=0, columnspan=2, sticky="w", pady=(0, 4))
@@ -1191,7 +1216,10 @@ class MainWindow:
         ttk.Button(row_fr, text="📁", style="Icon.TButton", command=_browse).grid(row=0, column=1)
 
     def _build_driver_persistent(self, left: tk.Frame, center: tk.Frame) -> None:
-        slurm_outer, slurm_body = _column_card(left, "Slurm Configuration")
+        for col in (left, center):
+            col.columnconfigure(0, weight=1)
+
+        _slurm_outer, slurm_body = _driver_grid_card(left, "Slurm Configuration", 0)
         slurm_form = ttk.Frame(slurm_body, style="CardSurface.TFrame")
         slurm_form.pack(fill=tk.X)
         self._driver_grid_fields(
@@ -1207,7 +1235,7 @@ class MainWindow:
         )
         card_footer(slurm_body, "# SBATCH cluster scheduling parameters")
 
-        paths_outer, paths_body = _column_card(left, "Paths")
+        _paths_outer, paths_body = _driver_grid_card(left, "Paths", 1)
         paths_body.columnconfigure(0, weight=1)
         paths_body.columnconfigure(1, weight=0)
         for row, (label, key, tip) in enumerate(
@@ -1222,7 +1250,7 @@ class MainWindow:
             self._driver_path_row(paths_body, label, key, tip, row)
         card_footer(paths_body, "Truncated paths | Click browse to locate directories", row=10)
 
-        exp_outer, exp_body = _column_card(center, "Experiment Configuration")
+        _exp_outer, exp_body = _driver_grid_card(center, "Experiment Configuration", 0)
         exp_form = ttk.Frame(exp_body, style="CardSurface.TFrame")
         exp_form.pack(fill=tk.X)
         self._driver_grid_fields(
@@ -1244,7 +1272,23 @@ class MainWindow:
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(SPACE_SM, 0))
         card_footer(exp_body, "Experiment metadata & runtime limits")
 
-        env_outer, env_body = _column_card(left, "Environment Setup")
+        _rc_outer, rc_body = _driver_grid_card(center, "Run Configuration", 1)
+        rc_body.columnconfigure(0, weight=1)
+        self._run_config_preview = tk.Text(
+            rc_body,
+            height=6,
+            wrap=tk.WORD,
+            bg=INPUT_BG,
+            fg=TEXT_MAIN,
+            relief=tk.FLAT,
+            highlightthickness=0,
+            font=(FONT_MONO, max(8, FONT_PT_BASE - 1)),
+            state=tk.DISABLED,
+        )
+        self._run_config_preview.pack(fill=tk.X)
+        card_footer(rc_body, "Generated run matrix from driver + permutation selections")
+
+        _env_outer, env_body = _driver_grid_card(center, "Environment Setup", 2)
         env_body.columnconfigure(0, weight=1)
         for row, (label, key, tip) in enumerate(
             [
@@ -1272,10 +1316,39 @@ class MainWindow:
         add_tooltip(self._driver_modules_text, "Environment modules to load (one per line).")
         card_footer(env_body, "Runtime environment dependencies", row=6)
 
-        rc_outer, rc_body = _column_card(center, "Run Configuration")
-        rc_body.columnconfigure(0, weight=1)
-        self._run_config_preview = tk.Text(
-            rc_body,
+        self._apply_driver_values(gui_values_from_document(self._driver_document))
+
+    def _build_driver_summary(self, parent: tk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+
+        _actions_outer, actions_body = _driver_grid_card(parent, "Driver", 0)
+        btn_row = ttk.Frame(actions_body, style="CardSurface.TFrame")
+        btn_row.pack(fill=tk.X, pady=(0, SPACE_SM))
+        ttk.Button(
+            btn_row,
+            text="Upload Driver",
+            style="Secondary.TButton",
+            command=self._driver_upload,
+        ).pack(side=tk.LEFT, padx=(0, SPACE_SM))
+        ttk.Button(
+            btn_row,
+            text="Save Driver",
+            style="Secondary.TButton",
+            command=self._driver_save,
+        ).pack(side=tk.LEFT)
+        self._driver_page_path_lbl = ttk.Label(
+            actions_body,
+            text="No driver.yaml loaded",
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT,
+        )
+        self._driver_page_path_lbl.pack(anchor="w")
+
+        _summary_outer, body = _driver_grid_card(parent, "Driver Summary", 1)
+        body.columnconfigure(0, weight=1)
+        self._driver_summary_text = tk.Text(
+            body,
             height=8,
             wrap=tk.WORD,
             bg=INPUT_BG,
@@ -1285,17 +1358,81 @@ class MainWindow:
             font=(FONT_MONO, max(8, FONT_PT_BASE - 1)),
             state=tk.DISABLED,
         )
-        self._run_config_preview.pack(fill=tk.X)
-        card_footer(rc_body, "Generated run matrix from driver + permutation selections")
+        self._driver_summary_text.pack(fill=tk.X)
+        card_footer(body, "Stack status · YAML paths and run estimate")
+        self._refresh_driver_summary()
 
-        self._apply_driver_values(gui_values_from_document(self._driver_document))
+    def _update_driver_path_labels(self) -> None:
+        if self._driver_file_path:
+            text = f"Loaded: {self._driver_file_path}"
+        else:
+            text = "No driver.yaml loaded"
+        try:
+            self._driver_path_lbl.configure(text=text)
+        except (tk.TclError, AttributeError):
+            pass
+        if hasattr(self, "_driver_page_path_lbl"):
+            try:
+                self._driver_page_path_lbl.configure(text=text)
+            except tk.TclError:
+                pass
 
-    def _build_driver_page(self, parent: ttk.Frame) -> None:
-        """Driver tab uses shared left/center columns + permutation stack on the right."""
+    def _refresh_driver_summary(self) -> None:
+        if not hasattr(self, "_driver_summary_text"):
+            return
+        lines: list[str] = []
+        if self._driver_file_path:
+            lines.append(f"Driver: {self._driver_file_path}")
+        else:
+            lines.append("Driver: not loaded")
+        stack = (
+            ("Permutations", self._perm_file_path),
+            ("Topologies", self._topo_file_path),
+            ("Assignments", self._assign_file_path),
+            ("Definitions", self._defn_file_path),
+            ("Network", self._net_file_path),
+        )
+        for label, path in stack:
+            lines.append(f"{label}: {path.name if path else '(not loaded)'}")
+        if self._run_configuration is not None and self._run_configuration.estimated_run_count > 0:
+            lines.append(f"Estimated runs: {self._run_configuration.estimated_run_count}")
+        elif self._driver_file_path:
+            lines.append("Run matrix: pending validation")
+        try:
+            self._driver_summary_text.configure(state=tk.NORMAL)
+            self._driver_summary_text.delete("1.0", tk.END)
+            self._driver_summary_text.insert("1.0", "\n".join(lines))
+            self._driver_summary_text.configure(state=tk.DISABLED)
+        except tk.TclError:
+            pass
+        self._update_driver_path_labels()
+
+    def _build_driver_page(self, parent: tk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
+        grid = tk.Frame(parent, bg=BG_MAIN, highlightthickness=0)
+        grid.pack(fill=tk.X, anchor=tk.N)
+        for c in range(3):
+            grid.columnconfigure(c, weight=1, uniform="driver3")
+        grid.rowconfigure(0, weight=0)
+
+        left = tk.Frame(grid, bg=BG_MAIN, highlightthickness=0)
+        center = tk.Frame(grid, bg=BG_MAIN, highlightthickness=0)
+        right = tk.Frame(grid, bg=BG_MAIN, highlightthickness=0)
+        left.grid(row=0, column=0, sticky="new", padx=(0, CARD_GAP))
+        center.grid(row=0, column=1, sticky="new", padx=(0, CARD_GAP))
+        right.grid(row=0, column=2, sticky="new")
+
+        self._build_driver_persistent(left, center)
+        self._build_driver_summary(right)
 
     def _build_permutation_stack(self, parent: tk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
+        grid = tk.Frame(parent, bg=BG_MAIN, highlightthickness=0)
+        grid.pack(fill=tk.X, anchor=tk.N)
+        perm_cols = 3
+        for c in range(perm_cols):
+            grid.columnconfigure(c, weight=1, uniform="permcol")
+
         self._perm_section_bodies = {}
         _perm_titles = {
             "topology": "Topology permutations",
@@ -1305,22 +1442,25 @@ class MainWindow:
             "communication": "Communication permutations",
             "model": "Model permutations",
         }
-        for sec in PERMUTATION_SECTIONS:
+        for idx, sec in enumerate(PERMUTATION_SECTIONS):
             title = _perm_titles.get(sec["key"], f"{sec['title']} permutations")
+            row, col = divmod(idx, perm_cols)
+            cell = tk.Frame(grid, bg=BG_MAIN, highlightthickness=0)
+            cell.grid(row=row, column=col, sticky="new", padx=(0, CARD_GAP), pady=(0, CARD_GAP))
             card = PermutationPanel(
-                parent,
+                cell,
                 title,
                 start_open=True,
                 on_toggle=self._perm_sync_scroll,
             )
-            card.outer.pack(fill=tk.X, pady=(0, SPACE_XS))
+            card.outer.pack(fill=tk.X)
             self._perm_section_bodies[sec["key"]] = card.body
 
-        self._perm_rebuild_checkboxes()
-
-    def _build_permutations_page(self, parent: ttk.Frame) -> None:
-        """Permutations tab shares the right-column permutation stack with Driver."""
+    def _build_permutations_page(self, parent: tk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
+        host = tk.Frame(parent, bg=BG_MAIN, highlightthickness=0)
+        host.pack(fill=tk.X, anchor=tk.N)
+        self._build_permutation_stack(host)
 
     def _collect_driver_values(self) -> dict[str, Any]:
         values: dict[str, Any] = {}
@@ -1368,31 +1508,33 @@ class MainWindow:
         self._driver_document = doc
         print_driver_load_report(doc, source=self._driver_file_path)
         self._apply_driver_values(gui_values_from_document(doc))
-        self._driver_path_lbl.configure(text=f"Loaded: {self._driver_file_path}")
-        self._page_notebook.select(0)
+        self._update_driver_path_labels()
+        self._select_main_tab(0)
 
         loaded: list[str] = []
         issues: list[str] = []
-        for label, auto_load in (
-            ("permutations.yaml", self._perm_auto_load_from_driver),
-            ("topologies.yaml", self._topo_auto_load_from_driver),
-            ("assignments.yaml", self._assign_auto_load_from_driver),
-            ("definitions.yaml", self._defn_auto_load_from_driver),
-        ):
-            err = auto_load(doc, show_warnings=False)
-            if err:
-                issues.append(err)
-            else:
-                loaded.append(label)
+        self._batch_stack_refresh = True
+        try:
+            for label, auto_load in (
+                ("permutations.yaml", self._perm_auto_load_from_driver),
+                ("topologies.yaml", self._topo_auto_load_from_driver),
+                ("assignments.yaml", self._assign_auto_load_from_driver),
+                ("definitions.yaml", self._defn_auto_load_from_driver),
+            ):
+                err = auto_load(doc, show_warnings=False)
+                if err:
+                    issues.append(err)
+                else:
+                    loaded.append(label)
+        finally:
+            self._batch_stack_refresh = False
 
-        # network.yaml is no longer used: the Network page is built from the
-        # optimizers/criteria embedded in definitions.yaml models.
+        self._assign_refresh_dropdowns()
         self._net_populate_from_definitions()
-
         self._sync_experiment_from_yaml_stack()
-        # Generate experiment instances automatically once the YAML stack is
-        # loaded and the run configuration validates (no Run click required).
         self._auto_generate_experiment_instances()
+        self._refresh_driver_summary()
+        self._refresh_run_config_preview()
 
         if issues:
             parts = [f"Driver configuration loaded:\n{self._driver_file_path}"]
@@ -1579,7 +1721,7 @@ class MainWindow:
             return
 
         self._driver_document = merged
-        self._driver_path_lbl.configure(text=f"Loaded: {self._driver_file_path}")
+        self._update_driver_path_labels()
         messagebox.showinfo("Save Driver", f"Driver configuration saved.\n\n{self._driver_file_path}")
 
     # --- Permutations page ---
@@ -1601,53 +1743,60 @@ class MainWindow:
             out[sec_key] = {name for name, var in var_map.items() if var.get()}
         return out
 
+    def _on_perm_selection_changed(self, *_args: Any) -> None:
+        if self._perm_rebuild_active or self._batch_stack_refresh:
+            return
+        self._refresh_run_config_preview()
+
     def _perm_rebuild_checkboxes(self) -> None:
-        self._perm_checkbox_vars = {}
-        selections = selections_from_document(self._perm_document)
+        self._perm_rebuild_active = True
+        try:
+            self._perm_checkbox_vars = {}
+            selections = selections_from_document(self._perm_document)
 
-        for sec in PERMUTATION_SECTIONS:
-            key = sec["key"]
-            body = self._perm_section_bodies[key]
-            for child in body.winfo_children():
-                child.destroy()
+            for sec in PERMUTATION_SECTIONS:
+                key = sec["key"]
+                body = self._perm_section_bodies[key]
+                for child in body.winfo_children():
+                    child.destroy()
 
-            options = self._perm_all_options.get(key, [])
-            self._perm_checkbox_vars[key] = {}
+                options = self._perm_all_options.get(key, [])
+                self._perm_checkbox_vars[key] = {}
 
-            if not options:
-                ttk.Label(
-                    body,
-                    text="No options available. Upload driver.yaml to load permutations.",
-                    style="TLabel",
-                    foreground=MUTED_TEXT,
-                    wraplength=480,
-                    justify=tk.LEFT,
-                ).pack(anchor="w", pady=4)
-                continue
+                if not options:
+                    ttk.Label(
+                        body,
+                        text="No options available. Upload driver.yaml to load permutations.",
+                        style="TLabel",
+                        foreground=MUTED_TEXT,
+                        wraplength=480,
+                        justify=tk.LEFT,
+                    ).pack(anchor="w", pady=4)
+                    continue
 
-            chosen = selections.get(key, set())
-            chk_grid = ttk.Frame(body, style="CardSurface.TFrame")
-            chk_grid.pack(fill=tk.X)
-            perm_cols = 3
-            for c in range(perm_cols):
-                chk_grid.columnconfigure(c, weight=1)
-            for idx, name in enumerate(options):
-                row, col = divmod(idx, perm_cols)
-                var = tk.BooleanVar(value=name in chosen)
-                self._perm_checkbox_vars[key][name] = var
-                var.trace_add("write", lambda *_: self._refresh_run_config_preview())
-                cell = ttk.Frame(chk_grid, style="CardSurface.TFrame")
-                cell.grid(row=row, column=col, sticky="w", padx=(0, SPACE_XS), pady=2)
-                ttk.Checkbutton(
-                    cell,
-                    text=name,
-                    variable=var,
-                    style="Blue.TCheckbutton",
-                ).pack(anchor="w")
+                chosen = selections.get(key, set())
+                chk_grid = ttk.Frame(body, style="CardSurface.TFrame")
+                chk_grid.pack(fill=tk.X)
+                perm_cols = 3
+                for c in range(perm_cols):
+                    chk_grid.columnconfigure(c, weight=1)
+                for idx, name in enumerate(options):
+                    row, col = divmod(idx, perm_cols)
+                    var = tk.BooleanVar(value=name in chosen)
+                    self._perm_checkbox_vars[key][name] = var
+                    var.trace_add("write", self._on_perm_selection_changed)
+                    cell = ttk.Frame(chk_grid, style="CardSurface.TFrame")
+                    cell.grid(row=row, column=col, sticky="w", padx=(0, SPACE_XS), pady=2)
+                    ttk.Checkbutton(
+                        cell,
+                        text=name,
+                        variable=var,
+                        style="Blue.TCheckbutton",
+                    ).pack(anchor="w")
+        finally:
+            self._perm_rebuild_active = False
 
         self._perm_sync_scroll()
-        if hasattr(self, "_run_config_preview"):
-            self._refresh_run_config_preview()
 
     def _perm_apply_loaded(
         self,
@@ -1666,8 +1815,10 @@ class MainWindow:
             all_options=self._perm_all_options,
         )
         self._perm_rebuild_checkboxes()
+        self._pages_hydrated.add(1)
         self._perm_path_lbl.configure(text=f"Loaded: {self._perm_file_path}")
-        self._refresh_run_config_preview()
+        if not self._batch_stack_refresh:
+            self._refresh_run_config_preview()
         if show_message:
             messagebox.showinfo("Permutations", f"Permutations loaded.\n\n{self._perm_file_path}")
 
@@ -1811,12 +1962,11 @@ class MainWindow:
     # --- Topologies page ---
     def _build_topologies_page(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
-
-        self._topo_cards_host = tk.Frame(parent, bg=BG_MAIN)
-        self._topo_cards_host.grid(row=0, column=0, sticky="new")
+        host = tk.Frame(parent, bg=BG_MAIN, highlightthickness=0)
+        host.pack(fill=tk.X, anchor=tk.N)
+        host.columnconfigure(0, weight=1)
+        self._topo_cards_host = host
         self._topo_card_grid: CardGrid | None = None
-
-        self._topo_rebuild_cards()
 
     def _topo_path_from_driver(self, driver_doc: dict[str, Any] | None = None) -> str:
         doc = driver_doc if driver_doc is not None else self._driver_document
@@ -2045,6 +2195,7 @@ class MainWindow:
         self._topo_document = document
         print_topologies_load_report(document, source=self._topo_file_path)
         self._topo_rebuild_cards()
+        self._pages_hydrated.add(2)
         self._topo_path_lbl.configure(text=f"Loaded: {self._topo_file_path}")
         if show_message:
             messagebox.showinfo("Topologies", f"Topologies loaded.\n\n{self._topo_file_path}")
@@ -2200,7 +2351,7 @@ class MainWindow:
         parent.columnconfigure(0, weight=1)
 
         host = tk.Frame(parent, bg=BG_MAIN)
-        host.grid(row=0, column=0, sticky="new")
+        host.pack(fill=tk.X, anchor=tk.N)
         self._assign_section_hosts = {}
         self._assign_card_grids: dict[str, CardGrid] = {}
         for sec in ASSIGNMENT_SECTIONS:
@@ -2216,8 +2367,6 @@ class MainWindow:
             card_grid = CardGrid(body, columns=2)
             self._assign_card_grids[sec["key"]] = card_grid
             self._assign_section_hosts[sec["key"]] = card_grid.frame
-
-        self._assign_rebuild_all()
 
     def _assign_path_from_driver(self, driver_doc: dict[str, Any] | None = None) -> str:
         doc = driver_doc if driver_doc is not None else self._driver_document
@@ -2258,8 +2407,16 @@ class MainWindow:
     def _assign_configure_row_dropdowns(self, row: dict[str, Any], section_key: str) -> None:
         agent_entry = row["agent_entry"]
         ref_entry = row["ref_entry"]
-        agent_entry.configure(values=merge_dropdown_values(self._assign_agent_options(), agent_entry.get()))
-        ref_entry.configure(values=merge_dropdown_values(self._assign_reference_options(section_key), ref_entry.get()))
+        agent_vals = merge_dropdown_values(self._assign_agent_options(), agent_entry.get())
+        ref_vals = merge_dropdown_values(self._assign_reference_options(section_key), ref_entry.get())
+        agent_id = id(agent_entry)
+        ref_id = id(ref_entry)
+        if self._assign_dropdown_cache.get(agent_id) != agent_vals:
+            agent_entry.configure(values=agent_vals)
+            self._assign_dropdown_cache[agent_id] = agent_vals
+        if self._assign_dropdown_cache.get(ref_id) != ref_vals:
+            ref_entry.configure(values=ref_vals)
+            self._assign_dropdown_cache[ref_id] = ref_vals
 
     def _assign_refresh_dropdowns(self) -> None:
         """Refresh agent/reference combobox suggestions from driver + definitions.yaml."""
@@ -2470,6 +2627,7 @@ class MainWindow:
         self._assign_document = document
         print_assignments_load_report(document, source=self._assign_file_path)
         self._assign_rebuild_all()
+        self._pages_hydrated.add(3)
         self._assign_path_lbl.configure(text=f"Loaded: {self._assign_file_path}")
         if show_message:
             messagebox.showinfo("Assignments", f"Assignments loaded.\n\n{self._assign_file_path}")
@@ -2842,7 +3000,7 @@ class MainWindow:
         parent.columnconfigure(0, weight=1)
 
         host = tk.Frame(parent, bg=BG_MAIN)
-        host.grid(row=0, column=0, sticky="new")
+        host.pack(fill=tk.X, anchor=tk.N)
         self._defn_section_hosts = {}
         self._defn_card_grids: dict[str, CardGrid] = {}
         for sec in DEFINITION_SECTIONS:
@@ -2858,8 +3016,6 @@ class MainWindow:
             card_grid = CardGrid(body, columns=2)
             self._defn_card_grids[sec["key"]] = card_grid
             self._defn_section_hosts[sec["key"]] = card_grid.frame
-
-        self._defn_rebuild_all()
 
     def _defn_path_from_driver(self, driver_doc: dict[str, Any] | None = None) -> str:
         doc = driver_doc if driver_doc is not None else self._driver_document
@@ -2958,11 +3114,13 @@ class MainWindow:
         self._defn_document = document
         print_definitions_load_report(document, source=self._defn_file_path)
         self._defn_rebuild_all()
+        self._pages_hydrated.add(4)
         self._defn_path_lbl.configure(text=f"Loaded: {self._defn_file_path}")
         if show_message:
             messagebox.showinfo("Definitions", f"Definitions loaded.\n\n{self._defn_file_path}")
-        self._assign_refresh_dropdowns()
-        self._net_populate_from_definitions()
+        if not self._batch_stack_refresh:
+            self._assign_refresh_dropdowns()
+            self._net_populate_from_definitions()
         self._maybe_refresh_experiment_yaml_sync()
 
     def _defn_auto_load_from_driver(
@@ -3248,7 +3406,7 @@ class MainWindow:
         parent.columnconfigure(0, weight=1)
 
         host = tk.Frame(parent, bg=BG_MAIN)
-        host.grid(row=0, column=0, sticky="new")
+        host.pack(fill=tk.X, anchor=tk.N)
 
         _opt_outer, opt_body = _column_card(host, "Optimizers")
         opt_btn = ttk.Frame(opt_body, style="CardSurface.TFrame")
@@ -3264,8 +3422,6 @@ class MainWindow:
         self._net_crit_card_grid = CardGrid(crit_body, columns=1)
         self._net_criteria_host = self._net_crit_card_grid.frame
 
-        self._net_rebuild_all()
-
     def _net_path_from_driver(self, driver_doc: dict[str, Any] | None = None) -> str:
         doc = driver_doc if driver_doc is not None else self._driver_document
         return str(gui_values_from_document(doc).get("paths_network", "") or "").strip()
@@ -3280,6 +3436,7 @@ class MainWindow:
         if not hasattr(self, "_net_optimizers_host"):
             return
         self._net_rebuild_all()
+        self._pages_hydrated.add(5)
         state = network_gui_state_from_document(self._net_document)
         if state["optimizers"] or state["criteria"]:
             src = self._defn_file_path.name if self._defn_file_path else "definitions.yaml"
@@ -3521,22 +3678,24 @@ class MainWindow:
 
         grid = tk.Frame(parent, bg=BG_MAIN, highlightthickness=0)
         grid.pack(fill=tk.X, anchor=tk.N)
-        for c in range(3):
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        exp_cols = 2
+        for c in range(exp_cols):
             grid.columnconfigure(c, weight=1, uniform="expcol")
 
         left = tk.Frame(grid, bg=BG_MAIN, highlightthickness=0)
-        center = tk.Frame(grid, bg=BG_MAIN, highlightthickness=0)
         right = tk.Frame(grid, bg=BG_MAIN, highlightthickness=0)
         left.grid(row=0, column=0, sticky="new", padx=(0, CARD_GAP))
-        center.grid(row=0, column=1, sticky="new", padx=(0, CARD_GAP))
-        right.grid(row=0, column=2, sticky="new")
+        right.grid(row=0, column=1, sticky="new")
+        center = left
         self._exp_layout = None
 
         self._build_experiment_instance_panel(left)
         self._build_environment_panel(left)
-        self._build_communication_panel(center)
-        self._build_group_policy_panel(center)
-        self._build_topology_panel(center)
+        self._build_topology_panel(left)
+        self._build_communication_panel(right)
+        self._build_group_policy_panel(right)
         self._build_profile_assignment_panel(right)
         self._build_model_assignment_panel(right)
         self._build_data_assignment_panel(right)
@@ -3558,6 +3717,36 @@ class MainWindow:
         )
         self._execution_preview.pack(fill=tk.X)
         self._refresh_execution_preview()
+
+        exec_row = ttk.Frame(right, style="CardSurface.TFrame")
+        exec_row.pack(fill=tk.X, pady=(0, CARD_GAP))
+        ttk.Button(
+            exec_row,
+            text="Load Export Directory",
+            style="Secondary.TButton",
+            command=self._load_manifest_export_directory,
+        ).pack(side=tk.LEFT, padx=(0, SPACE_SM))
+        ttk.Label(
+            exec_row,
+            text="Run opens Graph, Summary, Logs & Terminal in the execution window.",
+            style="Muted.TLabel",
+            wraplength=420,
+        ).pack(side=tk.LEFT)
+
+        _cmd_outer, cmd_body = _column_card(right, "Command Preview")
+        cmd_body.columnconfigure(0, weight=1)
+        self._command_preview = tk.Text(
+            cmd_body,
+            height=6,
+            wrap=tk.WORD,
+            bg=INPUT_BG,
+            fg=TEXT_MAIN,
+            relief=tk.FLAT,
+            highlightthickness=0,
+            font=(FONT_MONO, max(8, FONT_PT_BASE - 1)),
+            state=tk.DISABLED,
+        )
+        self._command_preview.pack(fill=tk.X)
 
     def _build_experiment_instance_panel(self, parent, *, grid: CardGrid | None = None) -> None:
         outer, inner = _make_panel(parent, "Manifest Preview", plain_inner=True)
@@ -5445,6 +5634,8 @@ class MainWindow:
         self._refresh_run_config_preview()
 
     def _maybe_refresh_experiment_yaml_sync(self) -> None:
+        if self._batch_stack_refresh:
+            return
         if not getattr(self, "_yaml_stack_sync_active", False):
             return
         self._sync_experiment_from_yaml_stack()
